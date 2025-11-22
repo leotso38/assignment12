@@ -129,7 +129,6 @@ async def decode_token(
             detail="Could not validate credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )
-
 async def get_current_user(
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db)
@@ -139,27 +138,36 @@ async def get_current_user(
     Returns the actual User model instance.
     """
     try:
+        # Will raise HTTPException(401, ...) on invalid/expired/blacklisted token
         payload = await decode_token(token, TokenType.ACCESS)
         user_id = payload["sub"]
-        
+
         user = db.query(User).filter(User.id == user_id).first()
         if user is None:
+            # 404 branch: user doesn’t exist
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="User not found"
             )
-            
+
         if not user.is_active:
+            # 400 branch: user inactive
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Inactive user"
             )
-            
+
         return user
-        
-    except Exception as e:
+
+    except HTTPException:
+        # Preserve the original HTTPException (401 from decode_token,
+        # or 400/404 from the checks above).
+        raise
+
+    except Exception:
+        # Catch-all for unexpected errors
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=str(e),
+            detail="Could not validate credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )

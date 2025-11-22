@@ -1,46 +1,63 @@
 # app/auth/redis.py
 
-from datetime import datetime, timedelta
-from typing import Dict, Optional
+import time
+from typing import Optional, Dict
 
-# Simple in-memory blacklist for JWT IDs (jti)
-# Key: jti (str)
-# Value: expiry datetime (or None for no expiry)
-_blacklist: Dict[str, Optional[datetime]] = {}
+# Simple in-memory blacklist: jti -> expires_at (unix timestamp or None)
+_BLACKLIST: Dict[str, Optional[float]] = {}
 
 
-async def add_to_blacklist(jti: str, expires_in: Optional[int] = None) -> None:
+async def add_to_blacklist(
+    jti: str,
+    expires_in: Optional[int] = None,
+    expires_in_seconds: Optional[int] = None,
+) -> None:
     """
-    Add a token's JTI to the blacklist.
+    Add a token JTI to the blacklist with optional expiration.
 
-    :param jti: The JWT ID to blacklist
-    :param expires_in: Optional TTL in seconds (if provided by your JWT logic)
+    - If both expires_in and expires_in_seconds are provided,
+      expires_in takes precedence.
+    - If the chosen value is None, the token never expires.
+    - If it is 0, the token expires immediately.
     """
+    # Choose which TTL to use (tests call both styles)
     if expires_in is not None:
-        expiry = datetime.utcnow() + timedelta(seconds=expires_in)
+        ttl = expires_in
     else:
-        expiry = None
+        ttl = expires_in_seconds
 
-    _blacklist[jti] = expiry
+    if ttl is None:
+        # Never expires
+        expires_at: Optional[float] = None
+    else:
+        # Expire after ttl seconds (can be 0 → immediate)
+        expires_at = time.time() + ttl
+
+    _BLACKLIST[jti] = expires_at
+    # No asyncio / trio calls here: works in both backends
 
 
 async def is_blacklisted(jti: str) -> bool:
     """
-    Check if a JTI is blacklisted, respecting expiry if set.
-    Expired entries are cleaned up on access.
+    Check whether a JTI is blacklisted and not expired.
+    Expired JTIs are removed.
     """
-    if jti not in _blacklist:
+    sentinel = object()
+    expires_at = _BLACKLIST.get(jti, sentinel)
+
+    # Not present at all
+    if expires_at is sentinel:
         return False
 
-    expiry = _blacklist[jti]
-
-    # No expiry: always blacklisted
-    if expiry is None:
+    # Present and no expiry → always blacklisted
+    if expires_at is None:
         return True
 
-    # If expired, remove and treat as not blacklisted
-    if expiry < datetime.utcnow():
-        _blacklist.pop(jti, None)
+    # Has expiry timestamp
+    now = time.time()
+    if now >= expires_at:
+        # Expired → clean up
+        del _BLACKLIST[jti]
         return False
 
     return True
